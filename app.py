@@ -14,18 +14,29 @@ except ImportError:
 
 
 # =========================================================
-# INSTÄLLNINGAR
+# APP
 # =========================================================
 
 st.set_page_config(
-    page_title="Golf Deal Analyzer V3",
+    page_title="Golf Deal Analyzer",
     page_icon="⛳",
     layout="wide"
 )
 
+
+# =========================================================
+# KONSTANTER
+# =========================================================
+
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    "User-Agent": (
+        "Mozilla/5.0 "
+        "(Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 "
+        "Chrome/139 Safari/537.36"
+    )
 }
+
 
 KNOWN_BRANDS = [
     "Titleist",
@@ -44,40 +55,88 @@ KNOWN_BRANDS = [
     "Honma"
 ]
 
+
 CLUB_TYPES = [
     "driver",
     "fairway wood",
+    "fairway",
     "hybrid",
     "iron",
+    "irons",
     "wedge",
     "putter",
-    "golfbag",
-    "golf bag"
+    "järnset",
+    "järnklubbor",
+    "golfklubba",
+    "golfklubbor"
 ]
 
-BAD_TERMS = [
-    "ny",
-    "new",
+
+EXCLUDED_TERMS = [
+    "golfbil",
+    "golf bil",
+    "golfcart",
+    "golf cart",
+    "golfcar",
+    "golf car",
+    "golfvagn",
+    "golf vagn",
+    "golf buggy",
+    "golf trolley",
+    "club car",
+    "ezgo",
+    "e-z-go",
+    "yamaha golf cart"
+]
+
+
+USED_WORDS = [
+    "begagnad",
+    "begagnat",
+    "begagnade",
+    "använd",
+    "använt",
+    "used",
+    "second hand"
+]
+
+
+NEW_WORDS = [
     "nypris",
-    "ordinarie pris",
-    "rek pris",
+    "ny produkt",
+    "helt ny",
+    "oöppnad",
+    "new",
     "retail",
     "msrp"
 ]
 
 
+CONDITION_SCORES = {
+    "ny/oöppnad": 1.00,
+    "nyskick": 0.97,
+    "mycket bra": 0.93,
+    "bra": 0.88,
+    "normalt bruksslitage": 0.80,
+    "slitet": 0.68,
+    "okänt": 0.82
+}
+
+
 # =========================================================
-# HJÄLPFUNKTIONER
+# TEXT / PRIS
 # =========================================================
 
 def clean(text):
-    return re.sub(r"\s+", " ", text or "").strip()
+    return re.sub(
+        r"\s+",
+        " ",
+        text or ""
+    ).strip()
 
 
 def normalize(text):
-    text = clean(text).lower()
-    text = text.replace("–", "-").replace("—", "-")
-    return text
+    return clean(text).lower()
 
 
 def money(text):
@@ -88,16 +147,24 @@ def money(text):
         r"(?<!\d)(\d{1,3}(?:[ .]\d{3})+)\s*(?:kr|sek)\b",
         r"(?<!\d)(\d{3,6})\s*(?:kr|sek)\b",
         r"(?<!\d)(\d{1,3}(?:[ .]\d{3})+)\s*:-",
-        r"(?<!\d)(\d{3,6})\s*:-",
+        r"(?<!\d)(\d{3,6})\s*:-"
     ]
 
     for pattern in patterns:
-        match = re.search(pattern, text, re.I)
+        match = re.search(
+            pattern,
+            text,
+            re.I
+        )
 
         if match:
             try:
                 return float(
-                    re.sub(r"[ .]", "", match.group(1))
+                    re.sub(
+                        r"[ .]",
+                        "",
+                        match.group(1)
+                    )
                 )
             except ValueError:
                 pass
@@ -105,7 +172,12 @@ def money(text):
     return None
 
 
+# =========================================================
+# ANNONS
+# =========================================================
+
 def fetch(url):
+
     response = requests.get(
         url,
         headers=HEADERS,
@@ -128,34 +200,50 @@ def fetch(url):
 
     meta = soup.find(
         "meta",
-        attrs={"name": "description"}
+        attrs={
+            "name": "description"
+        }
     )
 
     description = ""
 
     if meta:
         description = clean(
-            meta.get("content", "")
+            meta.get(
+                "content",
+                ""
+            )
         )
 
     body = clean(
-        soup.get_text(" ", strip=True)
+        soup.get_text(
+            " ",
+            strip=True
+        )
     )
 
-    return title, description, body
+    return (
+        title,
+        description,
+        body
+    )
 
+
+# =========================================================
+# TAVILY KEY
+# =========================================================
 
 def get_tavily_key():
-    """
-    Försöker först läsa Streamlit Secrets.
-    Fungerar även med environment variable.
-    """
 
     try:
-        key = st.secrets["TAVILY_API_KEY"]
+
+        key = st.secrets[
+            "TAVILY_API_KEY"
+        ]
 
         if key:
             return str(key).strip()
+
     except Exception:
         pass
 
@@ -165,87 +253,323 @@ def get_tavily_key():
     ).strip()
 
 
-def identify_product(text):
-    """
-    Försöker identifiera produktens viktigaste egenskaper.
-    """
+# =========================================================
+# PRODUKTIDENTIFIERING
+# =========================================================
 
-    low = normalize(text)
+def extract_year(text):
 
-    brands = []
-
-    for brand in KNOWN_BRANDS:
-        if brand.lower() in low:
-            brands.append(brand)
-
-    club_types = []
-
-    for club_type in CLUB_TYPES:
-        if club_type in low:
-            club_types.append(club_type)
-
-    # Hämta några modellord efter varumärket
-    model_words = []
-
-    for brand in brands:
-        pattern = re.escape(brand) + r"\s+([A-Za-z0-9\- ]{2,35})"
-
-        match = re.search(
-            pattern,
-            text,
-            re.I
-        )
-
-        if match:
-            candidate = clean(
-                match.group(1)
-            )
-
-            candidate = re.split(
-                r"\b(?:kr|sek|pris|begagnad|begagnat)\b",
-                candidate,
-                flags=re.I
-            )[0]
-
-            model_words.append(candidate.strip())
-
-    # Årsmodell
-    year_match = re.search(
+    match = re.search(
         r"\b(20(?:19|20|21|22|23|24|25|26))\b",
         text
     )
 
-    year = year_match.group(1) if year_match else None
+    if match:
+        return match.group(1)
 
-    # Setstorlek
-    set_match = re.search(
-        r"\b(\d+)\s*[-–]\s*(\d+)\b",
+    return None
+
+
+def extract_number_of_clubs(text):
+
+    low = normalize(text)
+
+    # Exempel:
+    # "6 klubbor"
+    # "6 clubs"
+    # "6 st"
+    patterns = [
+        r"\b(\d{1,2})\s*(?:st|stycken|klubbor|clubs)\b",
+        r"\b(\d{1,2})\s*clubs\b"
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            low
+        )
+
+        if match:
+
+            number = int(
+                match.group(1)
+            )
+
+            if 1 <= number <= 15:
+                return number
+
+    # Exempel 5-PW
+    match = re.search(
+        r"\b([3-9])\s*[-–]\s*(pw|gw|aw)\b",
+        low,
+        re.I
+    )
+
+    if match:
+
+        start = int(
+            match.group(1)
+        )
+
+        end = 10
+
+        # PW räknas här som sista klubban.
+        # 5-PW ≈ 6 klubbor.
+        return max(
+            1,
+            end - start + 1
+        )
+
+    return None
+
+
+def extract_set(text):
+
+    low = normalize(text)
+
+    patterns = [
+        r"\b([3-9])\s*[-–]\s*(pw|gw|aw)\b",
+        r"\b([3-9])\s*[-–]\s*([9])\b"
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            low,
+            re.I
+        )
+
+        if match:
+
+            return (
+                match.group(1)
+                + "-"
+                + match.group(2).upper()
+            )
+
+    return None
+
+
+def extract_flex(text):
+
+    low = normalize(text)
+
+    flexes = [
+        "x-stiff",
+        "x stiff",
+        "extra stiff",
+        "stiff",
+        "regular",
+        "senior",
+        "ladies",
+        "lite"
+    ]
+
+    for flex in flexes:
+
+        if flex in low:
+
+            return flex
+
+    return None
+
+
+def extract_shaft(text):
+
+    low = normalize(text)
+
+    shaft_keywords = [
+        "project x",
+        "kbs",
+        "dynamic gold",
+        "modus",
+        "tensei",
+        "ventus",
+        "hzrdus",
+        "diamana",
+        "aldila"
+    ]
+
+    for shaft in shaft_keywords:
+
+        if shaft in low:
+
+            return shaft
+
+    return None
+
+
+def extract_condition(text):
+
+    low = normalize(text)
+
+    if (
+        "oöppnad" in low
+        or "helt ny" in low
+    ):
+        return "ny/oöppnad"
+
+    if (
+        "nyskick" in low
+        or "som ny" in low
+    ):
+        return "nyskick"
+
+    if (
+        "mycket bra skick" in low
+        or "mycket fint skick" in low
+    ):
+        return "mycket bra"
+
+    if (
+        "bra skick" in low
+        or "fint skick" in low
+    ):
+        return "bra"
+
+    if (
+        "bruksslitage" in low
+        or "normalt slitage" in low
+    ):
+        return "normalt bruksslitage"
+
+    if (
+        "slitet" in low
+        or "slitage" in low
+        or "skador" in low
+    ):
+        return "slitet"
+
+    return "okänt"
+
+
+def extract_brand(text):
+
+    low = normalize(text)
+
+    for brand in KNOWN_BRANDS:
+
+        if brand.lower() in low:
+
+            return brand
+
+    return None
+
+
+def extract_club_type(text):
+
+    low = normalize(text)
+
+    # Prioritera specifika typer
+    if "fairway wood" in low:
+        return "fairway wood"
+
+    if "hybrid" in low:
+        return "hybrid"
+
+    if "driver" in low:
+        return "driver"
+
+    if (
+        "wedge" in low
+        or "wedges" in low
+    ):
+        return "wedge"
+
+    if "putter" in low:
+        return "putter"
+
+    if (
+        "järnset" in low
+        or "järnklubbor" in low
+        or "irons" in low
+        or "iron set" in low
+    ):
+        return "iron"
+
+    if (
+        "golfklubba" in low
+        or "golfklubbor" in low
+    ):
+        return "golfklubba"
+
+    return None
+
+
+def extract_model(text, brand):
+
+    if not brand:
+        return None
+
+    # Försök hitta text efter varumärket.
+    pattern = (
+        re.escape(brand)
+        + r"\s+([A-Za-z0-9\-]+(?:\s+[A-Za-z0-9\-]+){0,3})"
+    )
+
+    matches = re.findall(
+        pattern,
+        text,
+        re.I
+    )
+
+    if not matches:
+        return None
+
+    candidate = clean(
+        matches[0]
+    )
+
+    # Ta bort vanliga saker som inte är modellnamn.
+    candidate = re.split(
+        r"\b(?:kr|sek|pris|"
+        r"begagnad|begagnat|"
+        r"golfklubba|golfklubbor|"
+        r"stiff|regular|senior)\b",
+        candidate,
+        flags=re.I
+    )[0]
+
+    return clean(
+        candidate
+    )
+
+
+def identify_product(text):
+
+    brand = extract_brand(
         text
     )
 
-    set_range = None
-
-    if set_match:
-        set_range = (
-            set_match.group(1)
-            + "-"
-            + set_match.group(2)
-        )
+    model = extract_model(
+        text,
+        brand
+    )
 
     return {
-        "brands": brands,
-        "types": club_types,
-        "models": model_words,
-        "year": year,
-        "set_range": set_range
+        "brand": brand,
+        "model": model,
+        "year": extract_year(text),
+        "club_count": extract_number_of_clubs(text),
+        "set": extract_set(text),
+        "flex": extract_flex(text),
+        "shaft": extract_shaft(text),
+        "condition": extract_condition(text),
+        "club_type": extract_club_type(text)
     }
 
 
 # =========================================================
-# TAVILY
+# TAVILY SEARCH
 # =========================================================
 
-def tavily_search(query, max_results=8):
+def tavily_search(
+    query,
+    max_results=8
+):
+
     key = get_tavily_key()
 
     if not key:
@@ -271,64 +595,99 @@ def tavily_search(query, max_results=8):
 
 
 # =========================================================
-# JÄMFÖRELSEOBJEKT
+# SÖKFRÅGOR
 # =========================================================
 
 def build_search_queries(product):
-    """
-    Flera sökningar är bättre än en enda bred sökning.
-    """
 
-    brand = (
-        product["brands"][0]
-        if product["brands"]
-        else ""
-    )
-
-    model = (
-        product["models"][0]
-        if product["models"]
-        else ""
-    )
-
-    club_type = (
-        product["types"][0]
-        if product["types"]
-        else "golf"
-    )
-
+    brand = product["brand"] or ""
+    model = product["model"] or ""
     year = product["year"] or ""
-
-    queries = []
+    club_type = product["club_type"] or "golfklubba"
 
     base = clean(
         f"{brand} {model} {year}"
     )
 
-    queries.append(
-        f'"{base}" begagnad pris Sverige'
-    )
+    queries = [
 
-    queries.append(
-        f'{base} begagnat golf pris'
-    )
+        f'"{base}" "{club_type}" begagnad pris',
 
-    queries.append(
-        f'{base} säljes begagnad'
-    )
+        f'"{base}" begagnade golfklubbor pris',
 
-    if club_type:
-        queries.append(
-            f'{base} {club_type} begagnad Sverige'
+        f'"{base}" säljes golfklubbor',
+
+        f'"{base}" begagnad Sverige',
+
+        f'"{base}" Blocket',
+
+        f'"{base}" Tradera',
+
+        f'"{base}" Golfbidder'
+    ]
+
+    return list(
+        dict.fromkeys(
+            queries
         )
+    )
 
-    return list(dict.fromkeys(queries))
+
+# =========================================================
+# COMPARABLE MATCHING
+# =========================================================
+
+def condition_similarity(
+    target,
+    comp
+):
+
+    if target == "okänt":
+        return 0
+
+    if comp == "okänt":
+        return 0
+
+    if target == comp:
+        return 15
+
+    # Närliggande skick
+    good_conditions = {
+        "ny/oöppnad": 4,
+        "nyskick": 3,
+        "mycket bra": 2,
+        "bra": 1,
+        "normalt bruksslitage": 0,
+        "slitet": -2
+    }
+
+    t = good_conditions.get(
+        target,
+        0
+    )
+
+    c = good_conditions.get(
+        comp,
+        0
+    )
+
+    difference = abs(
+        t - c
+    )
+
+    if difference == 1:
+        return 8
+
+    if difference == 2:
+        return 3
+
+    return -5
 
 
-def similarity_score(product, result):
-    """
-    Ger varje träff en relevanspoäng.
-    """
+def comparable_score(
+    product,
+    result
+):
 
     text = normalize(
         result.get("title", "")
@@ -336,99 +695,303 @@ def similarity_score(product, result):
         + result.get("content", "")
     )
 
+    # -----------------------------------------------------
+    # GOLFBILAR = DIREKT BORT
+    # -----------------------------------------------------
+
+    for term in EXCLUDED_TERMS:
+
+        if term in text:
+            return -100, {}
+
     score = 0
 
-    # Varumärke
-    for brand in product["brands"]:
-        if brand.lower() in text:
+
+    # -----------------------------------------------------
+    # EXTRAHERA COMPS EGEN DATA
+    # -----------------------------------------------------
+
+    comp = identify_product(
+        text
+    )
+
+
+    # -----------------------------------------------------
+    # EXAKT MÄRKE
+    # -----------------------------------------------------
+
+    if (
+        product["brand"]
+        and comp["brand"]
+    ):
+
+        if (
+            product["brand"].lower()
+            == comp["brand"].lower()
+        ):
             score += 30
 
-    # Modell
-    for model in product["models"]:
-        words = [
-            w for w in normalize(model).split()
-            if len(w) >= 2
-        ]
-
-        for word in words:
-            if word in text:
-                score += 12
-
-    # Typ
-    for club_type in product["types"]:
-        if club_type in text:
-            score += 10
-
-    # År
-    if product["year"]:
-        if product["year"] in text:
-            score += 15
         else:
-            # Annat år är inte automatiskt fel,
-            # men får inte full poäng.
-            score -= 5
+            return -50, comp
 
-    # Begagnat
-    used_words = [
-        "begagnad",
-        "begagnat",
-        "begagnade",
-        "använd",
-        "använt",
-        "used"
-    ]
 
-    if any(word in text for word in used_words):
+    # -----------------------------------------------------
+    # EXAKT MODELL
+    # -----------------------------------------------------
+
+    if (
+        product["model"]
+        and comp["model"]
+    ):
+
+        target_model = normalize(
+            product["model"]
+        )
+
+        comp_model = normalize(
+            comp["model"]
+        )
+
+        if (
+            target_model
+            == comp_model
+        ):
+
+            score += 35
+
+        elif (
+            target_model in text
+        ):
+
+            score += 25
+
+        else:
+
+            score -= 15
+
+
+    # Om modellen finns i texten direkt
+    if (
+        product["model"]
+        and normalize(
+            product["model"]
+        ) in text
+    ):
+
         score += 15
 
-    # Nya produkter ska straffas
-    new_words = [
-        "ny",
-        "new",
-        "nypris",
-        "retail",
-        "msrp"
-    ]
+
+    # -----------------------------------------------------
+    # ÅR
+    # -----------------------------------------------------
+
+    if product["year"]:
+
+        if (
+            product["year"]
+            in text
+        ):
+
+            score += 20
+
+        else:
+
+            score -= 8
+
+
+    # -----------------------------------------------------
+    # KLUBBTYP
+    # -----------------------------------------------------
+
+    if (
+        product["club_type"]
+        and comp["club_type"]
+    ):
+
+        if (
+            product["club_type"]
+            == comp["club_type"]
+        ):
+
+            score += 15
+
+        else:
+
+            score -= 10
+
+
+    # -----------------------------------------------------
+    # ANTAL KLUBBOR
+    # -----------------------------------------------------
+
+    if product["club_count"]:
+
+        if comp["club_count"]:
+
+            difference = abs(
+                product["club_count"]
+                - comp["club_count"]
+            )
+
+            if difference == 0:
+
+                score += 25
+
+            elif difference == 1:
+
+                score += 15
+
+            elif difference == 2:
+
+                score += 5
+
+            else:
+
+                score -= 15
+
+        else:
+
+            # Vi vet inte antal i comp
+            score -= 3
+
+
+    # -----------------------------------------------------
+    # SET
+    # -----------------------------------------------------
+
+    if product["set"]:
+
+        if comp["set"]:
+
+            if (
+                product["set"].lower()
+                == comp["set"].lower()
+            ):
+
+                score += 20
+
+            else:
+
+                score -= 5
+
+
+    # -----------------------------------------------------
+    # FLEX
+    # -----------------------------------------------------
+
+    if product["flex"]:
+
+        if comp["flex"]:
+
+            if (
+                product["flex"]
+                == comp["flex"]
+            ):
+
+                score += 10
+
+            else:
+
+                score -= 5
+
+
+    # -----------------------------------------------------
+    # SKAFT
+    # -----------------------------------------------------
+
+    if product["shaft"]:
+
+        if comp["shaft"]:
+
+            if (
+                product["shaft"]
+                == comp["shaft"]
+            ):
+
+                score += 8
+
+
+    # -----------------------------------------------------
+    # SKICK
+    # -----------------------------------------------------
+
+    score += condition_similarity(
+        product["condition"],
+        comp["condition"]
+    )
+
+
+    # -----------------------------------------------------
+    # BEGAGNAD
+    # -----------------------------------------------------
 
     if any(
-        re.search(r"\b" + re.escape(word) + r"\b", text)
-        for word in new_words
+        word in text
+        for word in USED_WORDS
     ):
+
+        score += 10
+
+
+    # -----------------------------------------------------
+    # NYPRIS
+    # -----------------------------------------------------
+
+    if any(
+        word in text
+        for word in NEW_WORDS
+    ):
+
         score -= 20
 
-    return score
 
+    return score, comp
+
+
+# =========================================================
+# HÄMTA COMPS
+# =========================================================
 
 def get_comps(product):
-    """
-    Söker flera gånger och filtrerar resultat.
-    """
 
-    queries = build_search_queries(product)
+    queries = build_search_queries(
+        product
+    )
 
     all_results = []
 
     for query in queries:
 
         try:
+
             results = tavily_search(
                 query,
                 max_results=8
             )
+
         except Exception as e:
+
             st.error(
                 f"Tavily-fel: {e}"
             )
+
             return []
+
 
         for result in results:
 
             title = clean(
-                result.get("title", "")
+                result.get(
+                    "title",
+                    ""
+                )
             )
 
             content = clean(
-                result.get("content", "")
+                result.get(
+                    "content",
+                    ""
+                )
             )
 
             combined = (
@@ -437,172 +1000,254 @@ def get_comps(product):
                 + content
             )
 
-            price = money(combined)
+            price = money(
+                combined
+            )
 
             if not price:
                 continue
 
-            # Golfpriser under 100 kr är nästan
-            # alltid irrelevanta.
-            if price < 100:
+            if price < 200:
                 continue
 
-            relevance = similarity_score(
+            score, comp_data = comparable_score(
                 product,
                 result
             )
 
-            all_results.append({
-                "title": title,
-                "price": price,
-                "url": result.get(
-                    "url",
-                    ""
-                ),
-                "source": urlparse(
-                    result.get(
+            # Bara riktigt relevanta comps
+            if score < 55:
+                continue
+
+            all_results.append(
+                {
+                    "title": title,
+                    "price": price,
+                    "url": result.get(
                         "url",
                         ""
-                    )
-                ).netloc,
-                "snippet": content[:500],
-                "relevance": relevance
-            })
+                    ),
+                    "source": urlparse(
+                        result.get(
+                            "url",
+                            ""
+                        )
+                    ).netloc,
+                    "snippet": content[:500],
+                    "score": score,
+                    "comp": comp_data
+                }
+            )
 
-    # Ta bort dubbletter
+
+    # -----------------------------------------------------
+    # DUBLETTER
+    # -----------------------------------------------------
+
     unique = {}
 
     for item in all_results:
 
         key = (
-            normalize(item["title"]),
+            normalize(
+                item["title"]
+            ),
             item["price"]
         )
 
         if key not in unique:
+
             unique[key] = item
+
 
     comps = list(
         unique.values()
     )
 
-    # Endast relevanta resultat
-    comps = [
-        x for x in comps
-        if x["relevance"] >= 25
-    ]
 
-    # Sortera efter relevans
+    # -----------------------------------------------------
+    # SORTERA
+    # -----------------------------------------------------
+
     comps.sort(
-        key=lambda x: x["relevance"],
+        key=lambda x: x["score"],
         reverse=True
     )
 
-    return comps[:20]
+
+    return comps[:15]
 
 
 # =========================================================
-# MARKNADSVÄRDE
+# VIKTAT MARKNADSVÄRDE
 # =========================================================
 
-def calculate_market_value(comps):
-    """
-    Beräknar ett konservativt värde.
-    """
+def calculate_market_value(
+    comps
+):
 
-    prices = [
-        x["price"]
-        for x in comps
-        if x["price"]
-    ]
+    if len(comps) < 2:
 
-    if len(prices) < 2:
-        return None, "Låg", prices
+        return (
+            None,
+            "Låg",
+            []
+        )
 
-    prices.sort()
 
-    # Ta bort extrema outliers
-    if len(prices) >= 5:
+    weighted_prices = []
 
-        q1 = statistics.quantiles(
-            prices,
-            n=4
-        )[0]
+    for comp in comps:
 
-        q3 = statistics.quantiles(
-            prices,
-            n=4
-        )[2]
+        score = comp["score"]
 
-        iqr = q3 - q1
+        # Högre relevans = större vikt
+        weight = max(
+            1,
+            score - 40
+        )
 
-        lower = q1 - 1.5 * iqr
-        upper = q3 + 1.5 * iqr
+        weighted_prices.append(
+            (
+                comp["price"],
+                weight
+            )
+        )
 
-        filtered = [
-            p for p in prices
-            if lower <= p <= upper
-        ]
 
-        if len(filtered) >= 3:
-            prices = filtered
-
-    median = statistics.median(
-        prices
+    total_weight = sum(
+        weight
+        for _, weight
+        in weighted_prices
     )
 
-    # Konservativt marknadsvärde:
-    # medianen istället för max eller enkelt snitt.
-    value = round(
-        median / 100
+
+    if total_weight <= 0:
+
+        return (
+            None,
+            "Låg",
+            []
+        )
+
+
+    weighted_average = (
+        sum(
+            price * weight
+            for price, weight
+            in weighted_prices
+        )
+        / total_weight
+    )
+
+
+    # Median som skydd mot konstiga priser
+    median = statistics.median(
+        [
+            price
+            for price, _ in weighted_prices
+        ]
+    )
+
+
+    # Kombinera viktat snitt + median
+    market_value = (
+        weighted_average * 0.65
+        + median * 0.35
+    )
+
+
+    market_value = round(
+        market_value / 100
     ) * 100
 
-    if len(prices) >= 8:
+
+    if len(comps) >= 8:
+
         confidence = "Hög"
-    elif len(prices) >= 4:
+
+    elif len(comps) >= 4:
+
         confidence = "Medel"
+
     else:
+
         confidence = "Låg"
 
-    return value, confidence, prices
+
+    return (
+        market_value,
+        confidence,
+        weighted_prices
+    )
 
 
 # =========================================================
 # DEAL SCORE
 # =========================================================
 
-def calculate_score(
+def calculate_deal_score(
     asking_price,
     market_value,
     confidence,
-    comparable_count
+    comps
 ):
 
-    if not asking_price or not market_value:
+    if not asking_price:
         return None
 
+    if not market_value:
+        return None
+
+
     discount = (
-        market_value - asking_price
+        market_value
+        - asking_price
     ) / market_value
+
 
     score = 50
 
-    # Prisfördel
-    score += discount * 100
+    # Pris
+    score += (
+        discount * 100
+    )
 
-    # Datakvalitet
+
+    # Kvalitet
     if confidence == "Hög":
-        score += 8
-    elif confidence == "Medel":
-        score += 3
-    else:
-        score -= 8
 
-    # Antal comps
-    if comparable_count >= 8:
-        score += 5
-    elif comparable_count < 3:
+        score += 10
+
+    elif confidence == "Medel":
+
+        score += 3
+
+    else:
+
         score -= 10
+
+
+    # Hur bra är comps?
+    if comps:
+
+        avg_relevance = statistics.mean(
+            comp["score"]
+            for comp in comps
+        )
+
+        if avg_relevance >= 90:
+
+            score += 8
+
+        elif avg_relevance >= 75:
+
+            score += 4
+
+        elif avg_relevance < 65:
+
+            score -= 5
+
 
     return max(
         0,
@@ -631,24 +1276,28 @@ def verdict(score):
 
 
 # =========================================================
-# APP
+# UI
 # =========================================================
 
 st.title(
-    "⛳ Golf Deal Analyzer V3"
+    "⛳ Golf Deal Analyzer"
 )
 
 st.write(
-    "Analysera begagnad golfutrustning "
-    "med jämförbara priser och en "
-    "konservativ återförsäljningskalkyl."
+    "Analysera golfannonser baserat på "
+    "exakt modell, antal klubbor, år, "
+    "set, flex, skaft och skick."
 )
 
+
+# =========================================================
+# SIDOPANEL
+# =========================================================
 
 with st.sidebar:
 
     st.header(
-        "⚙️ Inställningar"
+        "⚙️ Kalkyl"
     )
 
     resale_fee = st.number_input(
@@ -676,39 +1325,61 @@ with st.sidebar:
     )
 
 
+# =========================================================
+# INPUT
+# =========================================================
+
 url = st.text_input(
-    "1. Annonslänk",
-    placeholder="https://..."
+    "🔗 Annonslänk",
+    placeholder="Klistra in Blocket-annonsen här"
 )
+
 
 manual = st.text_area(
-    "2. Eller klistra in annonsens titel + beskrivning",
-    height=150
+    "📝 Eller klistra in annonsens text",
+    height=180,
+    placeholder=(
+        "Exempel:\n"
+        "Titleist T200 2024\n"
+        "5-PW, 6 klubbor\n"
+        "Project X 6.0 stiff\n"
+        "Mycket bra skick\n"
+        "Pris 6000 kr"
+    )
 )
 
 
+# =========================================================
+# ANALYSERA
+# =========================================================
+
 if st.button(
-    "🔎 Analysera fynd",
+    "🚀 Analysera fynd",
     type="primary"
 ):
 
-    # -----------------------------------------
-    # LÄS ANNONS
-    # -----------------------------------------
-
     if not url.strip() and not manual.strip():
+
         st.error(
-            "Lägg in en annonslänk eller "
-            "klistra in annonsens text."
+            "Lägg in en annonslänk "
+            "eller annonsens text."
         )
+
         st.stop()
+
+
+    # -----------------------------------------------------
+    # LÄS ANNONS
+    # -----------------------------------------------------
 
     try:
 
         if manual.strip():
 
-            title = manual[:250]
+            title = manual[:300]
+
             description = manual
+
             body = ""
 
         else:
@@ -730,9 +1401,9 @@ if st.button(
         st.stop()
 
 
-    # -----------------------------------------
-    # IDENTIFIERA PRODUKT
-    # -----------------------------------------
+    # -----------------------------------------------------
+    # PRODUKTDATA
+    # -----------------------------------------------------
 
     full_text = clean(
         " ".join(
@@ -744,59 +1415,68 @@ if st.button(
         )
     )
 
+
     product = identify_product(
         full_text
     )
+
 
     asking_price = money(
         full_text
     )
 
 
+    # -----------------------------------------------------
+    # VISA PRODUKT
+    # -----------------------------------------------------
+
     st.subheader(
-        "🔎 Identifierat objekt"
+        "🔎 Produktidentifiering"
     )
 
-    col1, col2, col3, col4 = st.columns(4)
 
-    with col1:
-        st.metric(
-            "Annonspris",
-            f"{asking_price:,.0f} kr"
-            if asking_price
-            else "Ej hittat"
-        )
+    c1, c2, c3, c4 = st.columns(4)
 
-    with col2:
-        st.write(
-            "**Märke**"
-        )
+
+    with c1:
+
+        st.write("**Märke**")
 
         st.write(
-            ", ".join(
-                product["brands"]
+            product["brand"]
+            or "Ej identifierat"
+        )
+
+
+    with c2:
+
+        st.write("**Exakt modell**")
+
+        st.write(
+            product["model"]
+            or "Ej identifierad"
+        )
+
+
+    with c3:
+
+        st.write("**Antal klubbor**")
+
+        st.write(
+            (
+                str(
+                    product["club_count"]
+                )
+                + " st"
+                if product["club_count"]
+                else "Ej identifierat"
             )
-            if product["brands"]
-            else "Ej identifierat"
         )
 
-    with col3:
-        st.write(
-            "**Typ**"
-        )
 
-        st.write(
-            ", ".join(
-                product["types"]
-            )
-            if product["types"]
-            else "Ej identifierad"
-        )
+    with c4:
 
-    with col4:
-        st.write(
-            "**År**"
-        )
+        st.write("**År**")
 
         st.write(
             product["year"]
@@ -804,29 +1484,64 @@ if st.button(
         )
 
 
-    if product["models"]:
+    c5, c6, c7, c8 = st.columns(4)
+
+
+    with c5:
+
+        st.write("**Set**")
 
         st.write(
-            "**Modell:** "
-            + ", ".join(
-                product["models"]
-            )
-        )
-
-    if product["set_range"]:
-
-        st.write(
-            "**Set:** "
-            + product["set_range"]
+            product["set"]
+            or "Ej identifierat"
         )
 
 
-    # -----------------------------------------
+    with c6:
+
+        st.write("**Flex**")
+
+        st.write(
+            product["flex"]
+            or "Ej identifierad"
+        )
+
+
+    with c7:
+
+        st.write("**Skaft**")
+
+        st.write(
+            product["shaft"]
+            or "Ej identifierat"
+        )
+
+
+    with c8:
+
+        st.write("**Skick**")
+
+        st.write(
+            product["condition"]
+        )
+
+
+    st.metric(
+        "Annonspris",
+        (
+            f"{asking_price:,.0f} kr"
+            if asking_price
+            else "Ej hittat"
+        )
+    )
+
+
+    # -----------------------------------------------------
     # TAVILY
-    # -----------------------------------------
+    # -----------------------------------------------------
 
     with st.spinner(
-        "🌐 Söker efter relevanta jämförelseobjekt..."
+        "🌐 Söker efter exakt jämförbara golfklubbor..."
     ):
 
         comps = get_comps(
@@ -834,40 +1549,45 @@ if st.button(
         )
 
 
-    # -----------------------------------------
+    # -----------------------------------------------------
     # MARKNADSVÄRDE
-    # -----------------------------------------
+    # -----------------------------------------------------
 
-    market_value, confidence, used_prices = (
-        calculate_market_value(
-            comps
-        )
+    (
+        market_value,
+        confidence,
+        weighted_prices
+    ) = calculate_market_value(
+        comps
     )
 
 
-    # -----------------------------------------
-    # KALKYL
-    # -----------------------------------------
+    # -----------------------------------------------------
+    # ÅTERFÖRSÄLJNING
+    # -----------------------------------------------------
 
     if market_value:
 
-        # Vi räknar inte med att du alltid får
-        # exakt medianpriset vid försäljning.
         realistic_sale_price = round(
-            market_value * 0.95 / 100
+            market_value
+            * 0.95
+            / 100
         ) * 100
 
-        fee = (
+
+        selling_fee = (
             realistic_sale_price
             * resale_fee
             / 100
         )
 
+
         net_sale = (
             realistic_sale_price
-            - fee
+            - selling_fee
             - shipping
         )
+
 
         if asking_price:
 
@@ -876,9 +1596,13 @@ if st.button(
                 - asking_price
             )
 
+
             max_buy = (
                 net_sale
-                * (1 - target_margin / 100)
+                * (
+                    1
+                    - target_margin / 100
+                )
             )
 
         else:
@@ -889,79 +1613,106 @@ if st.button(
     else:
 
         realistic_sale_price = None
-        fee = None
         net_sale = None
         profit = None
         max_buy = None
 
 
-    # -----------------------------------------
+    # -----------------------------------------------------
     # SCORE
-    # -----------------------------------------
+    # -----------------------------------------------------
 
-    deal_score = calculate_score(
+    deal_score = calculate_deal_score(
         asking_price,
         market_value,
         confidence,
-        len(comps)
+        comps
     )
 
+
+    # -----------------------------------------------------
+    # RESULTAT
+    # -----------------------------------------------------
 
     st.divider()
 
     st.subheader(
-        "💰 Deal-analys"
+        "💰 Resultat"
     )
 
 
     c1, c2, c3, c4, c5, c6 = st.columns(6)
 
+
     with c1:
+
         st.metric(
             "Marknadsvärde",
-            f"{market_value:,.0f} kr"
-            if market_value
-            else "—"
+            (
+                f"{market_value:,.0f} kr"
+                if market_value
+                else "—"
+            )
         )
+
 
     with c2:
+
         st.metric(
             "Realistiskt säljpris",
-            f"{realistic_sale_price:,.0f} kr"
-            if realistic_sale_price
-            else "—"
+            (
+                f"{realistic_sale_price:,.0f} kr"
+                if realistic_sale_price
+                else "—"
+            )
         )
+
 
     with c3:
+
         st.metric(
             "Netto",
-            f"{net_sale:,.0f} kr"
-            if net_sale
-            else "—"
+            (
+                f"{net_sale:,.0f} kr"
+                if net_sale
+                else "—"
+            )
         )
+
 
     with c4:
+
         st.metric(
             "Vinst",
-            f"{profit:,.0f} kr"
-            if profit is not None
-            else "—"
+            (
+                f"{profit:,.0f} kr"
+                if profit is not None
+                else "—"
+            )
         )
+
 
     with c5:
+
         st.metric(
             "Max inköpspris",
-            f"{max_buy:,.0f} kr"
-            if max_buy
-            else "—"
+            (
+                f"{max_buy:,.0f} kr"
+                if max_buy
+                else "—"
+            )
         )
 
+
     with c6:
+
         st.metric(
             "Deal Score",
-            f"{deal_score}/100"
-            if deal_score is not None
-            else "—"
+            (
+                f"{deal_score}/100"
+                if deal_score is not None
+                else "—"
+            )
         )
 
 
@@ -970,35 +1721,38 @@ if st.button(
     )
 
 
-    # -----------------------------------------
+    # -----------------------------------------------------
     # KONFIDENS
-    # -----------------------------------------
+    # -----------------------------------------------------
 
     if confidence == "Hög":
 
         st.success(
             f"📊 Hög konfidens — "
-            f"{len(comps)} relevanta jämförelseobjekt hittades."
+            f"{len(comps)} relevanta "
+            f"jämförelseobjekt."
         )
 
     elif confidence == "Medel":
 
         st.warning(
             f"📊 Medelkonfidens — "
-            f"{len(comps)} relevanta jämförelseobjekt hittades."
+            f"{len(comps)} relevanta "
+            f"jämförelseobjekt."
         )
 
     else:
 
         st.error(
             f"📊 Låg konfidens — "
-            f"bara {len(comps)} relevanta jämförelseobjekt hittades."
+            f"{len(comps)} relevanta "
+            f"jämförelseobjekt."
         )
 
 
-    # -----------------------------------------
-    # BESLUT
-    # -----------------------------------------
+    # -----------------------------------------------------
+    # PRIS VS MAXPRIS
+    # -----------------------------------------------------
 
     if (
         asking_price
@@ -1006,34 +1760,36 @@ if st.button(
     ):
 
         difference = (
-            asking_price - max_buy
+            asking_price
+            - max_buy
         )
+
 
         if asking_price <= max_buy:
 
             st.success(
-                f"✅ Annonspriset ligger "
-                f"{abs(difference):,.0f} kr under "
-                f"ditt rekommenderade maxpris."
+                f"✅ Annonsen ligger "
+                f"{abs(difference):,.0f} kr "
+                f"under rekommenderat maxpris."
             )
 
         else:
 
             st.warning(
-                f"⚠️ Annonspriset ligger "
-                f"{difference:,.0f} kr över "
-                f"ditt rekommenderade maxpris."
+                f"⚠️ Annonsen ligger "
+                f"{difference:,.0f} kr "
+                f"över rekommenderat maxpris."
             )
 
 
-    # -----------------------------------------
+    # -----------------------------------------------------
     # COMPS
-    # -----------------------------------------
+    # -----------------------------------------------------
 
     st.divider()
 
     st.subheader(
-        "🔍 Jämförelseobjekt som användes"
+        "🔍 Jämförelseobjekt"
     )
 
 
@@ -1041,18 +1797,60 @@ if st.button(
 
         rows = []
 
-        for item in comps:
+        for comp in comps:
+
+            data = comp["comp"]
+
 
             rows.append(
                 {
-                    "Pris": f"{item['price']:,.0f} kr",
-                    "Relevans": item["relevance"],
-                    "Objekt": item["title"],
-                    "Källa": item["source"],
-                    "Länk": item["url"],
-                    "Utdrag": item["snippet"]
+                    "Pris":
+                        f"{comp['price']:,.0f} kr",
+
+                    "Match":
+                        f"{comp['score']}/100",
+
+                    "Modell":
+                        data.get(
+                            "model"
+                        ) or "—",
+
+                    "År":
+                        data.get(
+                            "year"
+                        ) or "—",
+
+                    "Klubbor":
+                        data.get(
+                            "club_count"
+                        ) or "—",
+
+                    "Set":
+                        data.get(
+                            "set"
+                        ) or "—",
+
+                    "Flex":
+                        data.get(
+                            "flex"
+                        ) or "—",
+
+                    "Skick":
+                        data.get(
+                            "condition"
+                        ) or "—",
+
+                    "Källa":
+                        comp["source"],
+
+                    "Annons":
+                        comp["title"],
+
+                    "Länk":
+                        comp["url"]
                 }
             )
+
 
         st.dataframe(
             rows,
@@ -1060,68 +1858,74 @@ if st.button(
             hide_index=True
         )
 
+
     else:
 
         st.error(
-            "❌ Hittade inga tillräckligt "
-            "relevanta jämförelseobjekt."
+            "❌ Hittade inte tillräckligt "
+            "många relevanta jämförelseobjekt."
         )
 
 
-    # -----------------------------------------
+    # -----------------------------------------------------
     # TRANSPARENS
-    # -----------------------------------------
+    # -----------------------------------------------------
 
     with st.expander(
-        "📊 Visa hur värdet beräknades"
+        "📊 Visa beräkningen"
     ):
 
         st.write(
-            "**Priser som användes:**"
+            "Marknadsvärdet baseras på "
+            "jämförelseobjektens relevans."
         )
 
-        if used_prices:
 
-            st.write(
-                ", ".join(
-                    f"{p:,.0f} kr"
-                    for p in used_prices
+        st.write(
+            "**Viktade priser:**"
+        )
+
+
+        if weighted_prices:
+
+            for price, weight in weighted_prices:
+
+                st.write(
+                    f"{price:,.0f} kr "
+                    f"(vikt {weight})"
                 )
-            )
 
-        else:
-
-            st.write(
-                "Inga tillräckliga priser."
-            )
 
         st.write(
             f"**Konfidens:** {confidence}"
         )
 
+
         st.write(
-            f"**Antal relevanta comps:** "
-            f"{len(comps)}"
+            f"**Antal comps:** {len(comps)}"
         )
+
 
         st.write(
             f"**Försäljningsavgift:** "
             f"{resale_fee:.1f}%"
         )
 
+
         st.write(
-            f"**Frakt/övriga kostnader:** "
+            f"**Frakt:** "
             f"{shipping:,.0f} kr"
         )
 
+
         st.write(
-            f"**Önskad säkerhetsmarginal:** "
+            f"**Säkerhetsmarginal:** "
             f"{target_margin:.1f}%"
         )
 
 
     with st.expander(
-        "📄 Annonsdata"
+        "📄 Visa annonsdata"
     ):
 
         st.write(
